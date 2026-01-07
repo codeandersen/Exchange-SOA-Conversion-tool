@@ -1,4 +1,4 @@
-# Exchange Cloud Manage Conversion Tool
+# Exchange SOA Conversion Tool
 
 A PowerShell GUI tool for switching the Exchange mailbox *source of authority* between on-premises and Exchange Online in a hybrid environment by toggling `IsExchangeCloudManaged`.
 
@@ -7,14 +7,18 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 
 ## Features
 
-- **GUI workflow**: Simple Windows Forms interface (connect, view users, convert, refresh, disconnect)
+- **Modern GUI interface**: Clean Windows Forms interface with responsive design and modern styling
 - **Automatic module installation**: Checks for `ExchangeOnlineManagement` and installs it in *CurrentUser* scope if needed
 - **Exchange Online connectivity**: Uses modern auth via `Connect-ExchangeOnline`
 - **Hybrid-focused user list**: Retrieves all EXO mailboxes and displays only directory-synced (`IsDirSynced = True`) objects
-- **Batch conversion**: Multi-select users and convert in bulk
+- **Pagination support**: Displays users in pages of 100 with Previous/Next navigation
+- **Batch conversion**: Multi-select users and convert in bulk with confirmation dialogs
 - **Cloud conversion**: Sets `IsExchangeCloudManaged = True`
 - **On-prem conversion**: Sets `IsExchangeCloudManaged = False`
 - **Logging + quick access**: Writes a timestamped log file and includes an **Open Log File** button
+- **Connection management**: Connect, refresh, and disconnect from Exchange Online with status indicators
+- **Logo support**: Displays custom logo (logo.png) if present in script directory
+- **Responsive layout**: Automatically adjusts to window resizing
 
 ## Requirements
 
@@ -39,31 +43,42 @@ Commonly used roles for this include (depending on your org model):
 
 1. **Run the Script**:
    ```powershell
-   .\Exchange-SOA-Conversion.ps1
+   .\Exchange-SOA-Conversion-Tool.ps1
    ```
 
 2. **Connect to Exchange Online**:
    - Click "Connect to EXO" button
    - Sign in with your Exchange Online admin credentials
    - The tool will automatically load directory-synced (`IsDirSynced = True`) mailbox users
+   - Button changes to "Connected" with green color upon successful connection
 
-3. **Convert Users**:
-   - Select a user from the list
+3. **Navigate Users**:
+   - Use "Previous" and "Next" buttons to navigate through pages of users
+   - Page information displays current page, total pages, and user count
+   - Each page shows up to 100 users
+
+4. **Convert Users**:
+   - Select one or multiple users from the list (multi-select supported)
    - Click "Convert to Cloud Managed" to enable cloud management
    - Click "Convert to On-Prem Managed" to revert to on-premises management
-   - You can multi-select users to run conversions in batch
+   - Confirm the conversion when prompted
+   - View batch conversion summary showing successful and failed conversions
 
-4. **Refresh User List**:
+5. **Refresh User List**:
    - Click "Refresh Users" to reload the mailbox list after conversions
 
-5. **Disconnect**:
+6. **View Logs**:
+   - Click "Open Log File" to view the session log in Notepad
+
+7. **Disconnect**:
    - Click "Disconnect from EXO" when finished
+   - Tool automatically disconnects when closing the window
 
 ## Log Files
 
 Log files are created in the same directory as the script with the naming format:
 ```
-ExchangeCloudManagement_YYYYMMDD_HHMM.log
+ExchangeSOAConversion_YYYYMMDD_HHMM.log
 ```
 
 Logged operations include:
@@ -94,6 +109,17 @@ The Microsoft article describes enabling Exchange attribute management in the cl
 - Exchange on-premises (traditional hybrid management)
 - Exchange Online (cloud-managed attributes)
 
+### What happens after conversion to cloud-managed?
+
+Once a user is converted to **cloud-managed** (`IsExchangeCloudManaged = True`), Exchange attributes for that mailbox can be managed directly in Exchange Online instead of on-premises Exchange. This means:
+
+- **Exchange attributes** (email addresses, mailbox settings, distribution group memberships, etc.) can be modified using Exchange Online PowerShell or the Exchange Admin Center
+- Changes no longer need to be made in the on-premises Exchange Management Console/Shell
+- The mailbox remains directory-synced from on-premises Active Directory, but Exchange-specific attributes are managed in the cloud
+- This provides flexibility in hybrid environments where on-premises Exchange may be decommissioned or scaled down
+
+**Important**: The user object itself is still synced from on-premises AD via Azure AD Connect. Only the Exchange recipient attributes are managed in the cloud.
+
 ## Reference
 
 For more information about Exchange cloud attributes management, see:
@@ -114,3 +140,10 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 
 - The tool intentionally filters out cloud-only mailboxes and shows only directory-synced mailboxes (`IsDirSynced = True`).
 - Changes may take time to reflect depending on your environment and any directory sync / hybrid processes.
+- Users are displayed in pages of 100 for better performance with large mailbox counts.
+- The tool automatically disconnects from Exchange Online when the window is closed.
+- Optional: Place a `logo.png` file in the same directory as the script to display a custom logo in the header.
+
+## Version
+
+Current version: 1.0

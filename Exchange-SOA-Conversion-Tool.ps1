@@ -39,7 +39,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $script:ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:LogFile = Join-Path $script:ScriptPath "ExchangeCloudManagement_$(Get-Date -Format 'yyyyMMdd_HHmm').log"
+$script:LogFile = Join-Path $script:ScriptPath "ExchangeSOAConversion_$(Get-Date -Format 'yyyyMMdd_HHmm').log"
 $script:AllUsers = @()
 $script:CurrentPage = 1
 $script:PageSize = 100
