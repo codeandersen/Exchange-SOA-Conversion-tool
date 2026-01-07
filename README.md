@@ -20,6 +20,12 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 - **Logo support**: Displays custom logo (logo.png) if present in script directory
 - **Responsive layout**: Automatically adjusts to window resizing
 
+## Screenshots
+
+![Exchange SOA Conversion Tool](Images/Exchange-SOA-Conversion-tool-GUI.png)
+
+*The Exchange SOA Conversion Tool showing a connected session with directory-synced mailboxes displayed in a paginated view.*
+
 ## Requirements
 
 - Windows PowerShell 5.1 or later
