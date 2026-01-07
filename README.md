@@ -24,7 +24,7 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 
 ![Exchange SOA Conversion Tool](Images/Exchange-SOA-Conversion-tool-GUI.png)
 
-*The Exchange SOA Conversion Tool showing a connected session with directory-synced mailboxes displayed in a paginated view.*
+*The Exchange SOA Conversion Tool showing a connected session with directory-synced mailboxes.*
 
 ## Requirements
 
