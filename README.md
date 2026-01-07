@@ -113,10 +113,25 @@ The Microsoft article describes enabling Exchange attribute management in the cl
 
 Once a user is converted to **cloud-managed** (`IsExchangeCloudManaged = True`), Exchange attributes for that mailbox can be managed directly in Exchange Online instead of on-premises Exchange. This means:
 
-- **Exchange attributes** (email addresses, mailbox settings, distribution group memberships, etc.) can be modified using Exchange Online PowerShell or the Exchange Admin Center
+- **Exchange attributes** can be modified using Exchange Online PowerShell or the Exchange Admin Center
 - Changes no longer need to be made in the on-premises Exchange Management Console/Shell
 - The mailbox remains directory-synced from on-premises Active Directory, but Exchange-specific attributes are managed in the cloud
 - This provides flexibility in hybrid environments where on-premises Exchange may be decommissioned or scaled down
+
+#### Attributes that can be edited in Exchange Online after conversion:
+
+**Custom and Extension Attributes:**
+- ExtensionAttribute1 through ExtensionAttribute15
+
+**Mailbox Settings:**
+- mail
+- altRecipient
+- authoring
+- msExchAssistantName
+- msExchAuditAdmin
+- etc. -> See more at https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
+
+
 
 **Important**: The user object itself is still synced from on-premises AD via Azure AD Connect. Only the Exchange recipient attributes are managed in the cloud.
 
