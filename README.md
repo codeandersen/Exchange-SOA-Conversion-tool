@@ -12,6 +12,7 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 - **Exchange Online connectivity**: Uses modern auth via `Connect-ExchangeOnline`
 - **Hybrid-focused user list**: Retrieves all EXO mailboxes and displays only directory-synced (`IsDirSynced = True`) objects
 - **Pagination support**: Displays users in pages of 100 with Previous/Next navigation
+- **Column sorting**: Click column headers to sort the entire dataset (across all pages) by Display Name, Email Address, or Cloud Managed status
 - **Batch conversion**: Multi-select users and convert in bulk with confirmation dialogs
 - **Cloud conversion**: Sets `IsExchangeCloudManaged = True`
 - **On-prem conversion**: Sets `IsExchangeCloudManaged = False`
@@ -58,10 +59,13 @@ Commonly used roles for this include (depending on your org model):
    - The tool will automatically load directory-synced (`IsDirSynced = True`) mailbox users
    - Button changes to "Connected" with green color upon successful connection
 
-3. **Navigate Users**:
+3. **Navigate and Sort Users**:
    - Use "Previous" and "Next" buttons to navigate through pages of users
    - Page information displays current page, total pages, and user count
    - Each page shows up to 100 users
+   - Click any column header (Display Name, Email Address, or Cloud Managed) to sort the entire dataset
+   - Clicking the same column header again reverses the sort order
+   - Sorting resets to page 1 and sorts across all users, not just the current page
 
 4. **Convert Users**:
    - Select one or multiple users from the list (multi-select supported)
@@ -165,6 +169,17 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 - The tool automatically disconnects from Exchange Online when the window is closed.
 - Optional: Place a `logo.png` file in the same directory as the script to display a custom logo in the header.
 
-## Version
+## Version History
 
-Current version: 1.0
+### Version 1.02
+- **Column sorting improvements**: Sorting now updates immediately after user conversions without requiring a refresh
+- **Bug fix**: Fixed sorting to work across all pages, not just the current page
+- **Data consistency**: User conversions now update both the display and underlying dataset for accurate sorting
+
+### Version 1.0
+- Initial release
+- GUI interface for Exchange SOA conversion
+- Pagination support for large user lists
+- Batch conversion capabilities
+- Automatic module installation
+- Logging and connection management

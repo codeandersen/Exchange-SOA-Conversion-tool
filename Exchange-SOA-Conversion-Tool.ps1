@@ -16,7 +16,7 @@
         C:\PS> .\Exchange-SOA-Conversion-Tool.ps1
 
         .NOTES
-        Version: 1.0
+        Version: 1.02
 
         .COPYRIGHT
         MIT License, feel free to distribute and use as you like, please leave author information.
@@ -32,7 +32,7 @@
         This script is provided AS-IS, with no warranty - Use at own risk.
     #>
 
-$script:Version = "1.0"
+$script:Version = "1.02"
 
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -43,6 +43,8 @@ $script:LogFile = Join-Path $script:ScriptPath "ExchangeSOAConversion_$(Get-Date
 $script:AllUsers = @()
 $script:CurrentPage = 1
 $script:PageSize = 100
+$script:SortColumn = $null
+$script:SortAscending = $true
 
 function Write-Log {
     param(
@@ -60,6 +62,54 @@ function Write-Log {
     Add-Content -Path $script:LogFile -Value $logEntry -Encoding UTF8
     
     Write-Host $logEntry
+}
+
+function Sort-Users {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ColumnName
+    )
+    
+    if ($script:AllUsers.Count -eq 0) {
+        return
+    }
+    
+    if ($script:SortColumn -eq $ColumnName) {
+        $script:SortAscending = -not $script:SortAscending
+    } else {
+        $script:SortColumn = $ColumnName
+        $script:SortAscending = $true
+    }
+    
+    switch ($ColumnName) {
+        "DisplayName" {
+            if ($script:SortAscending) {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property DisplayName
+            } else {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property DisplayName -Descending
+            }
+        }
+        "Email" {
+            if ($script:SortAscending) {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property PrimarySmtpAddress
+            } else {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property PrimarySmtpAddress -Descending
+            }
+        }
+        "IsExchangeCloudManaged" {
+            if ($script:SortAscending) {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property IsExchangeCloudManaged
+            } else {
+                $script:AllUsers = $script:AllUsers | Sort-Object -Property IsExchangeCloudManaged -Descending
+            }
+        }
+    }
+    
+    $script:CurrentPage = 1
+    Update-UserGrid
+    
+    $sortDirection = if ($script:SortAscending) { 'Ascending' } else { 'Descending' }
+    Write-Log "Sorted users by $ColumnName ($sortDirection)"
 }
 
 function Update-UserGrid {
@@ -461,6 +511,13 @@ $dataGridView.EnableHeadersVisualStyles = $false
 $dataGridView.RowHeadersVisible = $false
 $dataGridView.CellBorderStyle = [System.Windows.Forms.DataGridViewCellBorderStyle]::SingleHorizontal
 $dataGridView.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$dataGridView.Add_ColumnHeaderMouseClick({
+    param($sender, $e)
+    $columnName = $sender.Columns[$e.ColumnIndex].Name
+    if ($columnName -ne "UserPrincipalName") {
+        Sort-Users -ColumnName $columnName
+    }
+})
 
 $colDisplayName = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
 $colDisplayName.Name = "DisplayName"
@@ -590,6 +647,12 @@ $buttonConvertToCloud.Add_Click({
             
             if (Convert-ToCloudManaged -SelectedUser $selectedUser) {
                 $selectedRow.Cells["IsExchangeCloudManaged"].Value = "True"
+                
+                $userInArray = $script:AllUsers | Where-Object { $_.UserPrincipalName -eq $selectedUser.UserPrincipalName }
+                if ($userInArray) {
+                    $userInArray.IsExchangeCloudManaged = $true
+                }
+                
                 $successCount++
             } else {
                 $failCount++
@@ -661,6 +724,12 @@ $buttonConvertToOnPrem.Add_Click({
             
             if (Convert-ToOnPremManaged -SelectedUser $selectedUser) {
                 $selectedRow.Cells["IsExchangeCloudManaged"].Value = "False"
+                
+                $userInArray = $script:AllUsers | Where-Object { $_.UserPrincipalName -eq $selectedUser.UserPrincipalName }
+                if ($userInArray) {
+                    $userInArray.IsExchangeCloudManaged = $false
+                }
+                
                 $successCount++
             } else {
                 $failCount++
