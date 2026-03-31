@@ -16,7 +16,7 @@
         C:\PS> .\Exchange-SOA-Conversion-Tool.ps1
 
         .NOTES
-        Version: 1.02
+        Version: 1.03
 
         .COPYRIGHT
         MIT License, feel free to distribute and use as you like, please leave author information.
@@ -32,7 +32,7 @@
         This script is provided AS-IS, with no warranty - Use at own risk.
     #>
 
-$script:Version = "1.02"
+$script:Version = "1.03"
 
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -266,6 +266,29 @@ function Convert-ToCloudManaged {
     Write-Log "Converting user '$displayName' ($identity) to Cloud Managed..."
     
     try {
+        $mailbox = Get-Mailbox -Identity $identity -ErrorAction Stop
+        
+        $primarySmtp = $mailbox.PrimarySmtpAddress
+        $emailAddresses = $mailbox.EmailAddresses -join "; "
+        
+        Write-Log "User '$displayName' - Primary SMTP: $primarySmtp" -Level INFO
+        Write-Log "User '$displayName' - All Email Addresses: $emailAddresses" -Level INFO
+        Write-Log "User '$displayName' - HiddenFromAddressListsEnabled: $($mailbox.HiddenFromAddressListsEnabled)" -Level INFO
+        
+        $customAttribs = @()
+        for ($i = 1; $i -le 15; $i++) {
+            $attrName = "CustomAttribute$i"
+            $attrValue = $mailbox.$attrName
+            if ($attrValue) {
+                $customAttribs += "$attrName=$attrValue"
+            }
+        }
+        if ($customAttribs.Count -gt 0) {
+            Write-Log "User '$displayName' - Custom Attributes: $($customAttribs -join '; ')" -Level INFO
+        } else {
+            Write-Log "User '$displayName' - Custom Attributes: None set" -Level INFO
+        }
+        
         Set-Mailbox -Identity $identity -IsExchangeCloudManaged $true -ErrorAction Stop
         
         Write-Log "Successfully converted user '$displayName' ($identity) to Cloud Managed." -Level INFO

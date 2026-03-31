@@ -94,9 +94,16 @@ ExchangeSOAConversion_YYYYMMDD_HHMM.log
 Logged operations include:
 - Exchange Online Management module installation attempts
 - Connection to Exchange Online
-- User conversions to cloud managed
+- User conversions to cloud managed (including detailed attribute backup)
 - User conversions to on-premises managed
 - Any errors or warnings
+
+**Important**: When converting users to cloud-managed, the log file captures a complete backup of critical attributes:
+- Primary SMTP address and all email aliases (proxy addresses)
+- CustomAttribute1 through CustomAttribute15
+- HiddenFromAddressListsEnabled status
+
+This provides a comprehensive audit trail in case mailbox licenses are removed and attributes need to be recovered.
 
 ## PowerShell Commands
 
@@ -170,6 +177,13 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 - Optional: Place a `logo.png` file in the same directory as the script to display a custom logo in the header.
 
 ## Version History
+
+### Version 1.03
+- **Comprehensive attribute logging**: When converting to cloud-managed, the following attributes are now logged:
+  - Primary SMTP address and all email aliases
+  - CustomAttribute1 through CustomAttribute15
+  - HiddenFromAddressListsEnabled status
+- **License protection**: Provides complete audit trail in case mailbox licenses are removed and attributes get lost
 
 ### Version 1.02
 - **Column sorting improvements**: Sorting now updates immediately after user conversions without requiring a refresh
