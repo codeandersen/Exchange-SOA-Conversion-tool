@@ -268,9 +268,11 @@ function Convert-ToCloudManaged {
     try {
         $mailbox = Get-Mailbox -Identity $identity -ErrorAction Stop
         
+        $alias = $mailbox.Alias
         $primarySmtp = $mailbox.PrimarySmtpAddress
         $emailAddresses = $mailbox.EmailAddresses -join "; "
         
+        Write-Log "User '$displayName' - Alias (mailNickname): $alias" -Level INFO
         Write-Log "User '$displayName' - Primary SMTP: $primarySmtp" -Level INFO
         Write-Log "User '$displayName' - All Email Addresses: $emailAddresses" -Level INFO
         Write-Log "User '$displayName' - HiddenFromAddressListsEnabled: $($mailbox.HiddenFromAddressListsEnabled)" -Level INFO
