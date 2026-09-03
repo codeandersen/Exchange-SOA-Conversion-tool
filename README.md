@@ -30,7 +30,8 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 ## Requirements
 
 - Windows PowerShell 5.1 or later
-- Exchange Online PowerShell module: `ExchangeOnlineManagement`
+- Exchange Online PowerShell module: `ExchangeOnlineManagement` (tested with 3.6.0 and newer)
+  - Version 3.6.0 is the last version that still works inside the PowerShell ISE. Newer versions require the console, Windows Terminal or VS Code.
 - Connectivity to Exchange Online endpoints
 - Appropriate Exchange Online permissions to run `Get-Mailbox` and `Set-Mailbox`
 
@@ -166,6 +167,8 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 
 - **Connection Issues**: Verify your credentials have the necessary Exchange Online permissions
 
+- **GUI freezes after "Connect to EXO" and no sign-in dialog appears**: This was a deadlock between the Windows Forms UI thread and the module's asynchronous sign-in (seen with `ExchangeOnlineManagement` 3.6.0). Version 1.04 of the tool works around it. If it still happens, check the log file for the module version in use and report it as an issue.
+
 - **Conversion Failures**: Check the log file for detailed error messages
 
 ## Notes / limitations
@@ -177,6 +180,10 @@ https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-att
 - Optional: Place a `logo.png` file in the same directory as the script to display a custom logo in the header.
 
 ## Version History
+
+### Version 1.04
+- **Compatibility with ExchangeOnlineManagement 3.6.0**: Connecting no longer freezes the GUI without showing the sign-in dialog. The tool now clears the Windows Forms synchronization context while `Connect-ExchangeOnline` / `Disconnect-ExchangeOnline` run, which avoids the UI-thread deadlock. The module version in use is written to the log.
+- **Scrollable confirmation dialog**: The conversion confirmation now lists the selected users in a scrollable, resizable dialog instead of a MessageBox. With large selections (e.g. 100 users) the MessageBox previously grew beyond the screen and the Yes/No buttons were cut off.
 
 ### Version 1.03
 - **Comprehensive attribute logging**: When converting to cloud-managed, the following attributes are now logged:
