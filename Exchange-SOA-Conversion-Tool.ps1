@@ -16,7 +16,7 @@
         C:\PS> .\Exchange-SOA-Conversion-Tool.ps1
 
         .NOTES
-        Version: 1.03
+        Version: 1.04
 
         .COPYRIGHT
         MIT License, feel free to distribute and use as you like, please leave author information.
@@ -32,7 +32,7 @@
         This script is provided AS-IS, with no warranty - Use at own risk.
     #>
 
-$script:Version = "1.03"
+$script:Version = "1.04"
 
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -199,16 +199,53 @@ function Search-ExchangeOnlineModule {
     }
 }
 
+function Invoke-WithoutSyncContext {
+    <#
+        .SYNOPSIS
+        Runs a script block with the thread's SynchronizationContext temporarily removed.
+
+        .DESCRIPTION
+        Windows Forms installs a WindowsFormsSynchronizationContext on the UI thread as soon as the
+        first control is created. Connect-ExchangeOnline / Disconnect-ExchangeOnline block the calling
+        thread while waiting for asynchronous (MSAL sign-in / HTTP) work whose continuations are posted
+        back to that very same thread. Result: a deadlock - the GUI freezes and the sign-in dialog never
+        appears. Observed with ExchangeOnlineManagement 3.6.0 (the last version that still works in the
+        PowerShell ISE); newer versions use the WAM broker and were not affected in testing.
+
+        Clearing the synchronization context for the duration of the call lets the continuations run on
+        the thread pool instead, which avoids the deadlock.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$ScriptBlock
+    )
+
+    $previousContext = [System.Threading.SynchronizationContext]::Current
+
+    try {
+        [System.Threading.SynchronizationContext]::SetSynchronizationContext($null)
+        & $ScriptBlock
+    }
+    finally {
+        [System.Threading.SynchronizationContext]::SetSynchronizationContext($previousContext)
+    }
+}
+
 function Connect-ExchangeOnlineSession {
     Write-Log "Attempting to connect to Exchange Online..."
-    
+
     try {
         Import-Module ExchangeOnlineManagement -ErrorAction Stop
-        
-        Connect-ExchangeOnline -ErrorAction Stop -ShowBanner:$false
-        
+
+        $loadedModule = Get-Module -Name ExchangeOnlineManagement
+        Write-Log "Using Exchange Online Management module version $($loadedModule.Version)."
+
+        Invoke-WithoutSyncContext {
+            Connect-ExchangeOnline -ErrorAction Stop -ShowBanner:$false
+        }
+
         Write-Log "Successfully connected to Exchange Online."
-        
+
         return $true
     }
     catch {
@@ -223,6 +260,113 @@ function Connect-ExchangeOnlineSession {
         
         return $false
     }
+}
+
+function Show-ConversionConfirmation {
+    <#
+        .SYNOPSIS
+        Shows a resizable confirmation dialog with the selected users in a scrollable list.
+
+        .DESCRIPTION
+        Replaces the former MessageBox: with a large selection (e.g. 100 users) the MessageBox grew
+        taller than the screen and the Yes/No buttons were cut off. The user list now lives in a
+        ListBox with its own scrollbar, so the dialog keeps a fixed, sensible size.
+
+        Returns [System.Windows.Forms.DialogResult]::Yes or ::No.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$TargetState,
+
+        [Parameter(Mandatory=$true)]
+        [string[]]$UserNames,
+
+        [Parameter(Mandatory=$false)]
+        [System.Windows.Forms.Form]$Owner
+    )
+
+    $count = $UserNames.Count
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = "Confirm Conversion"
+    $dialog.Size = New-Object System.Drawing.Size(520, 420)
+    $dialog.MinimumSize = New-Object System.Drawing.Size(420, 300)
+    $dialog.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $dialog.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.ShowIcon = $false
+    $dialog.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#F3F3F3")
+
+    $labelQuestion = New-Object System.Windows.Forms.Label
+    $labelQuestion.Location = New-Object System.Drawing.Point(20, 20)
+    $labelQuestion.Size = New-Object System.Drawing.Size(465, 40)
+    $labelQuestion.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $labelQuestion.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#1F1F1F")
+    $labelQuestion.Text = if ($count -eq 1) {
+        "Are you sure you want to convert the following user to ${TargetState}?"
+    } else {
+        "Are you sure you want to convert the following $count users to ${TargetState}?"
+    }
+    $labelQuestion.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $dialog.Controls.Add($labelQuestion)
+
+    $listUsers = New-Object System.Windows.Forms.ListBox
+    $listUsers.Location = New-Object System.Drawing.Point(20, 65)
+    $listUsers.Size = New-Object System.Drawing.Size(465, 250)
+    $listUsers.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $listUsers.SelectionMode = [System.Windows.Forms.SelectionMode]::None
+    $listUsers.HorizontalScrollbar = $true
+    $listUsers.IntegralHeight = $false
+    $listUsers.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $listUsers.Items.AddRange([object[]]$UserNames)
+    $listUsers.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $dialog.Controls.Add($listUsers)
+
+    $buttonYes = New-Object System.Windows.Forms.Button
+    $buttonYes.Location = New-Object System.Drawing.Point(285, 330)
+    $buttonYes.Size = New-Object System.Drawing.Size(95, 32)
+    $buttonYes.Text = "Yes"
+    $buttonYes.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $buttonYes.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $buttonYes.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0078D4")
+    $buttonYes.ForeColor = [System.Drawing.Color]::White
+    $buttonYes.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $buttonYes.FlatAppearance.BorderSize = 0
+    $buttonYes.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $buttonYes.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $dialog.Controls.Add($buttonYes)
+
+    $buttonNo = New-Object System.Windows.Forms.Button
+    $buttonNo.Location = New-Object System.Drawing.Point(390, 330)
+    $buttonNo.Size = New-Object System.Drawing.Size(95, 32)
+    $buttonNo.Text = "No"
+    $buttonNo.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $buttonNo.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $buttonNo.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#E1E1E1")
+    $buttonNo.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#1F1F1F")
+    $buttonNo.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $buttonNo.FlatAppearance.BorderSize = 0
+    $buttonNo.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $buttonNo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $dialog.Controls.Add($buttonNo)
+
+    $dialog.AcceptButton = $buttonYes
+    $dialog.CancelButton = $buttonNo
+
+    try {
+        if ($Owner) {
+            $result = $dialog.ShowDialog($Owner)
+        } else {
+            $result = $dialog.ShowDialog()
+        }
+    }
+    finally {
+        $dialog.Dispose()
+    }
+
+    return $result
 }
 
 function Get-ExchangeUsers {
@@ -474,7 +618,9 @@ $buttonDisconnect.Add_Click({
     Write-Log "Disconnecting from Exchange Online..."
     
     try {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop
+        Invoke-WithoutSyncContext {
+            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop
+        }
         Write-Log "Successfully disconnected from Exchange Online."
         
         $buttonConnect.Text = "Connect to EXO"
@@ -643,22 +789,10 @@ $buttonConvertToCloud.Add_Click({
         return
     }
     
-    $selectedCount = $dataGridView.SelectedRows.Count
-    $userList = ($dataGridView.SelectedRows | ForEach-Object { $_.Cells["DisplayName"].Value }) -join ", "
-    
-    $confirmMessage = if ($selectedCount -eq 1) {
-        "Are you sure you want to convert user '$userList' to Cloud Managed?"
-    } else {
-        "Are you sure you want to convert $selectedCount users to Cloud Managed?`n`nUsers: $userList"
-    }
-    
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        $confirmMessage,
-        "Confirm Conversion",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
-    
+    $userNames = @($dataGridView.SelectedRows | ForEach-Object { [string]$_.Cells["DisplayName"].Value })
+
+    $result = Show-ConversionConfirmation -TargetState "Cloud Managed" -UserNames $userNames -Owner $form
+
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
         $successCount = 0
         $failCount = 0
@@ -720,22 +854,10 @@ $buttonConvertToOnPrem.Add_Click({
         return
     }
     
-    $selectedCount = $dataGridView.SelectedRows.Count
-    $userList = ($dataGridView.SelectedRows | ForEach-Object { $_.Cells["DisplayName"].Value }) -join ", "
-    
-    $confirmMessage = if ($selectedCount -eq 1) {
-        "Are you sure you want to convert user '$userList' to On-Premises Managed?"
-    } else {
-        "Are you sure you want to convert $selectedCount users to On-Premises Managed?`n`nUsers: $userList"
-    }
-    
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        $confirmMessage,
-        "Confirm Conversion",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
-    
+    $userNames = @($dataGridView.SelectedRows | ForEach-Object { [string]$_.Cells["DisplayName"].Value })
+
+    $result = Show-ConversionConfirmation -TargetState "On-Premises Managed" -UserNames $userNames -Owner $form
+
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
         $successCount = 0
         $failCount = 0
@@ -858,7 +980,9 @@ $form.Add_FormClosing({
     Write-Log "Exchange SOA Conversion tool Closing" -Level INFO
     
     try {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+        Invoke-WithoutSyncContext {
+            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+        }
         Write-Log "Disconnected from Exchange Online." -Level INFO
     }
     catch {
