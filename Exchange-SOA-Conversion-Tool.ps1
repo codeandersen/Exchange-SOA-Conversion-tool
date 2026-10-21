@@ -6,9 +6,10 @@
 
         .DESCRIPTION
         GUI tool to manage Exchange mailbox Source of Authority (SOA) conversion between cloud-managed and on-premises-managed by toggling the mailbox property `IsExchangeCloudManaged`.
-        
+
         The tool connects to Exchange Online PowerShell, lists directory-synced mailboxes (`IsDirSynced = True`), and supports converting one or multiple selected users in batch.
-        
+        A CSV backup of mail-related attributes is taken before every conversion, and a full backup of all directory-synced mailboxes can be exported on demand.
+
         This tool is intended to support the approach described in:
         https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
 
@@ -16,14 +17,14 @@
         C:\PS> .\Exchange-SOA-Conversion-Tool.ps1
 
         .NOTES
-        Version: 1.03
+        Version: 1.04
 
         .COPYRIGHT
         MIT License, feel free to distribute and use as you like, please leave author information.
 
        .LINK
         https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
-        
+
         BLOG: http://www.hcandersen.dk
         Twitter: @dk_hcandersen
         LinkedIn: https://www.linkedin.com/in/hanschrandersen/
@@ -32,36 +33,269 @@
         This script is provided AS-IS, with no warranty - Use at own risk.
     #>
 
-$script:Version = "1.03"
+$script:Version = "1.04"
 
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$script:ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $script:LogFile = Join-Path $script:ScriptPath "ExchangeSOAConversion_$(Get-Date -Format 'yyyyMMdd_HHmm').log"
 $script:AllUsers = @()
+$script:ViewUsers = @()
+$script:UserIndex = @{}
 $script:CurrentPage = 1
 $script:PageSize = 100
 $script:SortColumn = $null
 $script:SortAscending = $true
+$script:IsConnected = $false
+$script:IsBusy = $false
+$script:CancelRequested = $false
+$script:CloseRequested = $false
+$script:BackupFolder = $null
+
+$script:SoaBackupAttributes = @(
+    'WindowsEmailAddress'
+    'EmailAddresses'
+    'CustomAttribute1','CustomAttribute2','CustomAttribute3','CustomAttribute4','CustomAttribute5',
+    'CustomAttribute6','CustomAttribute7','CustomAttribute8','CustomAttribute9','CustomAttribute10',
+    'CustomAttribute11','CustomAttribute12','CustomAttribute13','CustomAttribute14','CustomAttribute15',
+    'ExtensionCustomAttribute1','ExtensionCustomAttribute2','ExtensionCustomAttribute3','ExtensionCustomAttribute4','ExtensionCustomAttribute5',
+    'HiddenFromAddressListsEnabled','ForwardingAddress','ForwardingSmtpAddress','DeliverToMailboxAndForward',
+    'GrantSendOnBehalfTo','AcceptMessagesOnlyFrom','AcceptMessagesOnlyFromDLMembers','AcceptMessagesOnlyFromSendersOrMembers',
+    'RejectMessagesFrom','RejectMessagesFromDLMembers','RejectMessagesFromSendersOrMembers',
+    'RequireSenderAuthenticationEnabled','ModerationEnabled','ModeratedBy','SendModerationNotifications',
+    'BypassModerationFromSendersOrMembers','LitigationHoldEnabled','LitigationHoldDate','LitigationHoldOwner',
+    'RetentionHoldEnabled','StartDateForRetentionHold','EndDateForRetentionHold','RetentionComment','RetentionUrl',
+    'SingleItemRecoveryEnabled','AuditEnabled','AuditLogAgeLimit','AuditAdmin','AuditDelegate','AuditOwner',
+    'ArchiveName','ArchiveGuid','LegacyExchangeDN','MailTipTranslations','ResourceCapacity','ResourceCustom','ImmutableId'
+)
 
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Message,
-        
+
         [Parameter(Mandatory=$false)]
         [ValidateSet('INFO','WARNING','ERROR')]
         [string]$Level = 'INFO'
     )
-    
+
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logEntry = "[$timestamp] [$Level] $Message"
-    
+
     Add-Content -Path $script:LogFile -Value $logEntry -Encoding UTF8
-    
+
     Write-Host $logEntry
+}
+
+function Format-SoaValue {
+    param(
+        [Parameter(Mandatory=$false)]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    if ($Value -is [datetime]) {
+        return $Value.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        $items = @()
+        foreach ($item in $Value) {
+            if ($null -ne $item) {
+                $items += $item.ToString()
+            }
+        }
+        return ($items -join '|')
+    }
+
+    return $Value.ToString()
+}
+
+function ConvertTo-SoaBackupRecord {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Mailbox,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Operation
+    )
+
+    $record = [ordered]@{
+        BackupTimestamp          = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Operation                = $Operation
+        DisplayName              = Format-SoaValue $Mailbox.DisplayName
+        UserPrincipalName        = Format-SoaValue $Mailbox.UserPrincipalName
+        Alias                    = Format-SoaValue $Mailbox.Alias
+        PrimarySmtpAddress       = Format-SoaValue $Mailbox.PrimarySmtpAddress
+        ExternalDirectoryObjectId = Format-SoaValue $Mailbox.ExternalDirectoryObjectId
+        Guid                     = Format-SoaValue $Mailbox.Guid
+        ExchangeGuid             = Format-SoaValue $Mailbox.ExchangeGuid
+        IsDirSynced              = Format-SoaValue $Mailbox.IsDirSynced
+        IsExchangeCloudManaged   = Format-SoaValue $Mailbox.IsExchangeCloudManaged
+        RecipientType            = Format-SoaValue $Mailbox.RecipientType
+        RecipientTypeDetails     = Format-SoaValue $Mailbox.RecipientTypeDetails
+    }
+
+    foreach ($attrName in $script:SoaBackupAttributes) {
+        $prop = $Mailbox.PSObject.Properties[$attrName]
+        $record[$attrName] = if ($prop) { Format-SoaValue $prop.Value } else { '' }
+    }
+
+    return [pscustomobject]$record
+}
+
+function Export-SoaBackupRecord {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Record,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+    $Record | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8 -Delimiter ';' -Append
+}
+
+function Select-SoaUsers {
+    param(
+        [Parameter(Mandatory=$false)]
+        $Users,
+
+        [Parameter(Mandatory=$false)]
+        [string]$SearchText
+    )
+
+    if ($null -eq $Users) {
+        return @()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SearchText)) {
+        return @($Users)
+    }
+
+    $term = $SearchText.ToLower()
+    return @($Users | Where-Object { $_.SearchText -and $_.SearchText.Contains($term) })
+}
+
+function Get-SoaBackupFolder {
+    if ($script:BackupFolder -and (Test-Path $script:BackupFolder)) {
+        return $script:BackupFolder
+    }
+
+    $folder = Join-Path $script:ScriptPath 'Backups'
+
+    if (-not (Test-Path $folder)) {
+        try {
+            New-Item -Path $folder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-Log "Failed to create backup folder '$folder': $($_.Exception.Message). Falling back to Documents." -Level WARNING
+            $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'ExchangeSOABackups'
+            New-Item -Path $folder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+    }
+
+    $script:BackupFolder = $folder
+    return $folder
+}
+
+function Set-BusyState {
+    param(
+        [Parameter(Mandatory=$true)]
+        [bool]$Busy,
+
+        [Parameter(Mandatory=$false)]
+        [string]$Message = ''
+    )
+
+    $script:IsBusy = $Busy
+
+    if ($Busy) {
+        $script:CancelRequested = $false
+        $buttonCancel.Enabled = $true
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $buttonConnect.Enabled = $false
+        $buttonRefresh.Enabled = $false
+        $buttonDisconnect.Enabled = $false
+        $buttonBackupAll.Enabled = $false
+        $buttonConvertToCloud.Enabled = $false
+        $buttonConvertToOnPrem.Enabled = $false
+        $buttonOpenLog.Enabled = $false
+        $dataGridView.Enabled = $false
+        $textBoxSearch.Enabled = $false
+        $buttonPrevPage.Enabled = $false
+        $buttonNextPage.Enabled = $false
+        $buttonCancel.Visible = $true
+        $progressBar.Visible = $true
+        if ($Message) {
+            $statusLabel.Text = $Message
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    else {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        $buttonConnect.Enabled = (-not $script:IsConnected)
+        $buttonRefresh.Enabled = $script:IsConnected
+        $buttonDisconnect.Enabled = $script:IsConnected
+        $buttonBackupAll.Enabled = $script:IsConnected
+        $buttonConvertToCloud.Enabled = $script:IsConnected
+        $buttonConvertToOnPrem.Enabled = $script:IsConnected
+        $buttonOpenLog.Enabled = $true
+        $dataGridView.Enabled = $true
+        $textBoxSearch.Enabled = $true
+        $buttonCancel.Visible = $false
+        $progressBar.Visible = $false
+        Update-UserGrid
+    }
+}
+
+function Update-UserGrid {
+    $totalUsers = $script:ViewUsers.Count
+    $totalPages = [Math]::Ceiling($totalUsers / $script:PageSize)
+
+    if ($script:CurrentPage -gt $totalPages -and $totalPages -gt 0) {
+        $script:CurrentPage = $totalPages
+    }
+
+    if ($script:CurrentPage -lt 1) {
+        $script:CurrentPage = 1
+    }
+
+    $startIndex = ($script:CurrentPage - 1) * $script:PageSize
+    $endIndex = [Math]::Min($startIndex + $script:PageSize - 1, $totalUsers - 1)
+
+    $dataGridView.Rows.Clear()
+
+    if ($totalUsers -gt 0) {
+        for ($i = $startIndex; $i -le $endIndex; $i++) {
+            $user = $script:ViewUsers[$i]
+            $cloudManagedStatus = if ($user.IsExchangeCloudManaged) { "True" } else { "False" }
+            $dataGridView.Rows.Add($user.DisplayName, $user.PrimarySmtpAddress, $user.RecipientTypeDetails, $cloudManagedStatus, $user.Guid) | Out-Null
+        }
+
+        $showingCount = $endIndex - $startIndex + 1
+        $filteredNote = ''
+        if ($script:ViewUsers.Count -ne $script:AllUsers.Count) {
+            $filteredNote = " (filtered from $($script:AllUsers.Count))"
+        }
+        $pageInfo.Text = "Page $($script:CurrentPage) of $totalPages - Showing $showingCount of $totalUsers users$filteredNote"
+    } else {
+        if ($script:AllUsers.Count -gt 0) {
+            $pageInfo.Text = "No users match the search (filtered from $($script:AllUsers.Count))"
+        } else {
+            $pageInfo.Text = "No users to display"
+        }
+    }
+
+    if (-not $script:IsBusy) {
+        $buttonPrevPage.Enabled = ($script:CurrentPage -gt 1)
+        $buttonNextPage.Enabled = ($script:CurrentPage -lt $totalPages)
+    }
 }
 
 function Sort-Users {
@@ -69,97 +303,50 @@ function Sort-Users {
         [Parameter(Mandatory=$true)]
         [string]$ColumnName
     )
-    
+
     if ($script:AllUsers.Count -eq 0) {
         return
     }
-    
+
     if ($script:SortColumn -eq $ColumnName) {
         $script:SortAscending = -not $script:SortAscending
     } else {
         $script:SortColumn = $ColumnName
         $script:SortAscending = $true
     }
-    
-    switch ($ColumnName) {
-        "DisplayName" {
-            if ($script:SortAscending) {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property DisplayName
-            } else {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property DisplayName -Descending
-            }
-        }
-        "Email" {
-            if ($script:SortAscending) {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property PrimarySmtpAddress
-            } else {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property PrimarySmtpAddress -Descending
-            }
-        }
-        "IsExchangeCloudManaged" {
-            if ($script:SortAscending) {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property IsExchangeCloudManaged
-            } else {
-                $script:AllUsers = $script:AllUsers | Sort-Object -Property IsExchangeCloudManaged -Descending
-            }
+
+    $sortProperty = switch ($ColumnName) {
+        "DisplayName"            { 'DisplayName' }
+        "Email"                  { 'PrimarySmtpAddress' }
+        "Type"                   { 'RecipientTypeDetails' }
+        "IsExchangeCloudManaged" { 'IsExchangeCloudManaged' }
+        default                  { $null }
+    }
+
+    if ($sortProperty) {
+        if ($script:SortAscending) {
+            $script:AllUsers = @($script:AllUsers | Sort-Object -Property $sortProperty)
+        } else {
+            $script:AllUsers = @($script:AllUsers | Sort-Object -Property $sortProperty -Descending)
         }
     }
-    
+
+    $script:ViewUsers = @(Select-SoaUsers -Users $script:AllUsers -SearchText $textBoxSearch.Text)
     $script:CurrentPage = 1
     Update-UserGrid
-    
+
     $sortDirection = if ($script:SortAscending) { 'Ascending' } else { 'Descending' }
     Write-Log "Sorted users by $ColumnName ($sortDirection)"
 }
 
-function Update-UserGrid {
-    param(
-        [Parameter(Mandatory=$false)]
-        [array]$Users = $script:AllUsers
-    )
-    
-    $script:AllUsers = $Users
-    $totalUsers = $script:AllUsers.Count
-    $totalPages = [Math]::Ceiling($totalUsers / $script:PageSize)
-    
-    if ($script:CurrentPage -gt $totalPages -and $totalPages -gt 0) {
-        $script:CurrentPage = $totalPages
-    }
-    
-    if ($script:CurrentPage -lt 1) {
-        $script:CurrentPage = 1
-    }
-    
-    $startIndex = ($script:CurrentPage - 1) * $script:PageSize
-    $endIndex = [Math]::Min($startIndex + $script:PageSize - 1, $totalUsers - 1)
-    
-    $dataGridView.Rows.Clear()
-    
-    if ($totalUsers -gt 0) {
-        for ($i = $startIndex; $i -le $endIndex; $i++) {
-            $user = $script:AllUsers[$i]
-            $cloudManagedStatus = if ($user.IsExchangeCloudManaged) { "True" } else { "False" }
-            $dataGridView.Rows.Add($user.DisplayName, $user.PrimarySmtpAddress, $cloudManagedStatus, $user.UserPrincipalName)
-        }
-        
-        $showingCount = $endIndex - $startIndex + 1
-        $pageInfo.Text = "Page $($script:CurrentPage) of $totalPages - Showing $showingCount of $totalUsers users"
-    } else {
-        $pageInfo.Text = "No users to display"
-    }
-    
-    $buttonPrevPage.Enabled = ($script:CurrentPage -gt 1)
-    $buttonNextPage.Enabled = ($script:CurrentPage -lt $totalPages)
-}
-
-function Search-ExchangeOnlineModule {
+function Initialize-ExchangeOnlineModule {
     Write-Log "Checking for Exchange Online Management module..."
-    
+
     $module = Get-Module -ListAvailable -Name ExchangeOnlineManagement
-    
+
     if (-not $module) {
         Write-Log "Exchange Online Management module not found. Attempting to install..." -Level WARNING
-        
+
         try {
             [System.Windows.Forms.MessageBox]::Show(
                 "Exchange Online Management module is not installed.`n`nThe tool will now attempt to install it. This may take a few minutes.",
@@ -167,29 +354,37 @@ function Search-ExchangeOnlineModule {
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
             )
-            
-            Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+
+            if ($PSVersionTable.PSEdition -ne 'Core') {
+                $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+                if (-not $nuget) {
+                    Write-Log "NuGet package provider not found. Installing..."
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
+                }
+            }
+
+            Install-Module -Name ExchangeOnlineManagement -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
             Write-Log "Exchange Online Management module installed successfully." -Level INFO
-            
+
             [System.Windows.Forms.MessageBox]::Show(
                 "Exchange Online Management module has been installed successfully.",
                 "Installation Complete",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
             )
-            
+
             return $true
         }
         catch {
             Write-Log "Failed to install Exchange Online Management module: $($_.Exception.Message)" -Level ERROR
-            
+
             [System.Windows.Forms.MessageBox]::Show(
                 "Failed to install Exchange Online Management module.`n`nError: $($_.Exception.Message)`n`nPlease install manually using:`nInstall-Module -Name ExchangeOnlineManagement -Scope CurrentUser",
                 "Installation Failed",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             )
-            
+
             return $false
         }
     }
@@ -201,131 +396,331 @@ function Search-ExchangeOnlineModule {
 
 function Connect-ExchangeOnlineSession {
     Write-Log "Attempting to connect to Exchange Online..."
-    
+
     try {
         Import-Module ExchangeOnlineManagement -ErrorAction Stop
-        
+
         Connect-ExchangeOnline -ErrorAction Stop -ShowBanner:$false
-        
+
         Write-Log "Successfully connected to Exchange Online."
-        
+
         return $true
     }
     catch {
         Write-Log "Failed to connect to Exchange Online: $($_.Exception.Message)" -Level ERROR
-        
+
         [System.Windows.Forms.MessageBox]::Show(
             "Failed to connect to Exchange Online.`n`nError: $($_.Exception.Message)",
             "Connection Failed",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         )
-        
+
         return $false
     }
 }
 
 function Get-ExchangeUsers {
-    Write-Log "Retrieving mailbox users from Exchange Online..."
-    
+    Write-Log "Retrieving directory-synced mailbox users from Exchange Online..."
+
+    $list = New-Object System.Collections.Generic.List[object]
+    $count = 0
+
     try {
-        $allMailboxes = Get-Mailbox -ResultSize Unlimited -ErrorAction Stop | Select-Object DisplayName, PrimarySmtpAddress, IsExchangeCloudManaged, UserPrincipalName, IsDirSynced, RecipientTypeDetails
-        
-        Write-Log "Retrieved $($allMailboxes.Count) total mailbox users."
-        
-        $hybridMailboxes = $allMailboxes | Where-Object { $_.IsDirSynced -eq $true }
-        
-        $cloudOnlyCount = $allMailboxes.Count - $hybridMailboxes.Count
-        Write-Log "Filtered out $cloudOnlyCount cloud-only mailboxes. Displaying $($hybridMailboxes.Count) hybrid/on-premises synced mailboxes."
-        
-        return $hybridMailboxes
+        do {
+            Get-Mailbox -Filter 'IsDirSynced -eq $true' -ResultSize Unlimited -ErrorAction Stop | ForEach-Object {
+                if ($script:CancelRequested) {
+                    break
+                }
+
+                $mbx = $_
+                $searchParts = @($mbx.DisplayName, $mbx.UserPrincipalName, $mbx.PrimarySmtpAddress) + @($mbx.EmailAddresses)
+                $searchText = (($searchParts | Where-Object { $_ }) -join ' ').ToLower()
+
+                $list.Add([pscustomobject]@{
+                    DisplayName            = [string]$mbx.DisplayName
+                    PrimarySmtpAddress     = [string]$mbx.PrimarySmtpAddress
+                    UserPrincipalName      = [string]$mbx.UserPrincipalName
+                    IsExchangeCloudManaged = [bool]$mbx.IsExchangeCloudManaged
+                    RecipientTypeDetails   = [string]$mbx.RecipientTypeDetails
+                    Guid                   = [string]$mbx.Guid
+                    SearchText             = $searchText
+                })
+
+                $count++
+                if ($count % 50 -eq 0) {
+                    $statusLabel.Text = "Loading users... $count loaded"
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+        } while ($false)
     }
     catch {
         Write-Log "Failed to retrieve mailbox users: $($_.Exception.Message)" -Level ERROR
-        
+
         [System.Windows.Forms.MessageBox]::Show(
             "Failed to retrieve mailbox users.`n`nError: $($_.Exception.Message)",
             "Retrieval Failed",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         )
-        
+
         return $null
     }
+
+    if ($script:CancelRequested) {
+        Write-Log "User load cancelled after $count users." -Level WARNING
+        return $null
+    }
+
+    Write-Log "Retrieved $count directory-synced mailbox users."
+
+    return ,$list
 }
 
-function Convert-ToCloudManaged {
+function Invoke-SoaConversion {
     param(
         [Parameter(Mandatory=$true)]
-        $SelectedUser
+        [bool]$ToCloud
     )
-    
-    $identity = $SelectedUser.UserPrincipalName
-    $displayName = $SelectedUser.DisplayName
-    
-    Write-Log "Converting user '$displayName' ($identity) to Cloud Managed..."
-    
+
+    if ($dataGridView.SelectedRows.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please select at least one user from the list.",
+            "No User Selected",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        return
+    }
+
+    $selected = @()
+    foreach ($row in $dataGridView.SelectedRows) {
+        $guid = [string]$row.Cells["Guid"].Value
+        if ($script:UserIndex.ContainsKey($guid)) {
+            $selected += [pscustomobject]@{ User = $script:UserIndex[$guid]; Row = $row }
+        }
+    }
+
+    if ($selected.Count -eq 0) {
+        return
+    }
+
+    $direction = if ($ToCloud) { 'Cloud Managed' } else { 'On-Premises Managed' }
+    $target = $ToCloud
+
+    $names = @($selected | ForEach-Object { $_.User.DisplayName } | Select-Object -First 20)
+    $nameList = $names -join ", "
+    if ($selected.Count -gt 20) {
+        $nameList += "... and $($selected.Count - 20) more"
+    }
+
+    $confirmMessage = "Are you sure you want to convert $($selected.Count) user(s) to ${direction}?`n`nUsers: $nameList"
+
+    if ($ToCloud) {
+        $confirmMessage += "`n`nNote: Per Microsoft guidance, wait for a directory sync cycle plus up to 24 hours after Set-RemoteMailbox changes or a mailbox move before converting to cloud-managed."
+    } else {
+        $confirmMessage += "`n`nWARNING: Exchange attributes changed in the cloud will be overwritten by the on-premises values on the next sync cycle. A CSV backup is taken before conversion."
+    }
+
+    $result = [System.Windows.Forms.MessageBox]::Show(
+        $confirmMessage,
+        "Confirm Conversion",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+        return
+    }
+
+    $operation = if ($ToCloud) { 'ToCloud' } else { 'ToOnPrem' }
+    $backupFile = $null
+    $successCount = 0
+    $skippedCount = 0
+    $failCount = 0
+    $current = 0
+
+    Set-BusyState -Busy $true -Message "Converting to $direction..."
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = $selected.Count
+    $progressBar.Value = 0
+
     try {
-        $mailbox = Get-Mailbox -Identity $identity -ErrorAction Stop
-        
-        $alias = $mailbox.Alias
-        $primarySmtp = $mailbox.PrimarySmtpAddress
-        $emailAddresses = $mailbox.EmailAddresses -join "; "
-        
-        Write-Log "User '$displayName' - Alias (mailNickname): $alias" -Level INFO
-        Write-Log "User '$displayName' - Primary SMTP: $primarySmtp" -Level INFO
-        Write-Log "User '$displayName' - All Email Addresses: $emailAddresses" -Level INFO
-        Write-Log "User '$displayName' - HiddenFromAddressListsEnabled: $($mailbox.HiddenFromAddressListsEnabled)" -Level INFO
-        
-        $customAttribs = @()
-        for ($i = 1; $i -le 15; $i++) {
-            $attrName = "CustomAttribute$i"
-            $attrValue = $mailbox.$attrName
-            if ($attrValue) {
-                $customAttribs += "$attrName=$attrValue"
+        $backupFolder = Get-SoaBackupFolder
+        $backupFile = Join-Path $backupFolder ("SOA-Backup_{0}_{1}.csv" -f $operation, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+        foreach ($entry in $selected) {
+            if ($script:CancelRequested) {
+                Write-Log "Conversion cancelled by user." -Level WARNING
+                break
+            }
+
+            $current++
+            $user = $entry.User
+            $statusLabel.Text = "Converting $current of $($selected.Count)..."
+            $progressBar.Value = [Math]::Min($current, $progressBar.Maximum)
+            [System.Windows.Forms.Application]::DoEvents()
+
+            try {
+                $mailbox = Get-Mailbox -Identity $user.Guid -ErrorAction Stop
+
+                if ([bool]$mailbox.IsExchangeCloudManaged -eq $target) {
+                    Write-Log "User '$($user.DisplayName)' ($($user.UserPrincipalName)) already has IsExchangeCloudManaged=$target. Skipped."
+                    $skippedCount++
+                    continue
+                }
+
+                try {
+                    $record = ConvertTo-SoaBackupRecord -Mailbox $mailbox -Operation $operation
+                    Export-SoaBackupRecord -Record $record -Path $backupFile
+                }
+                catch {
+                    Write-Log "Backup failed for '$($user.DisplayName)' ($($user.UserPrincipalName)): $($_.Exception.Message). Skipping conversion." -Level ERROR
+                    $failCount++
+                    continue
+                }
+
+                Set-Mailbox -Identity $user.Guid -IsExchangeCloudManaged $target -ErrorAction Stop
+
+                $user.IsExchangeCloudManaged = $target
+                $entry.Row.Cells["IsExchangeCloudManaged"].Value = if ($target) { "True" } else { "False" }
+
+                Write-Log "Converted user '$($user.DisplayName)' ($($user.UserPrincipalName)) to $direction."
+                $successCount++
+            }
+            catch {
+                Write-Log "Failed to convert user '$($user.DisplayName)' ($($user.UserPrincipalName)) to ${direction}: $($_.Exception.Message)" -Level ERROR
+                $failCount++
             }
         }
-        if ($customAttribs.Count -gt 0) {
-            Write-Log "User '$displayName' - Custom Attributes: $($customAttribs -join '; ')" -Level INFO
-        } else {
-            Write-Log "User '$displayName' - Custom Attributes: None set" -Level INFO
-        }
-        
-        Set-Mailbox -Identity $identity -IsExchangeCloudManaged $true -ErrorAction Stop
-        
-        Write-Log "Successfully converted user '$displayName' ($identity) to Cloud Managed." -Level INFO
-        
-        return $true
     }
-    catch {
-        Write-Log "Failed to convert user '$displayName' ($identity) to Cloud Managed. Error: $($_.Exception.Message)" -Level ERROR
-        
-        return $false
+    finally {
+        Set-BusyState -Busy $false
+    }
+
+    if ($successCount -gt 0 -and $backupFile -and (Test-Path $backupFile)) {
+        Write-Log "Backup written to $backupFile"
+    }
+
+    Write-Log "Batch conversion to $direction completed. Successful: $successCount, Skipped: $skippedCount, Failed: $failCount"
+
+    $summaryMessage = "Batch conversion completed.`n`nSuccessful: $successCount`nSkipped (already in target state): $skippedCount`nFailed: $failCount"
+    if ($backupFile -and (Test-Path $backupFile)) {
+        $summaryMessage += "`n`nBackup file:`n$backupFile"
+    }
+    if ($script:CancelRequested) {
+        $summaryMessage += "`n`nOperation was cancelled before all users were processed."
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $summaryMessage,
+        "Batch Conversion Summary",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+
+    if ($script:CloseRequested) {
+        $form.Close()
     }
 }
 
-function Convert-ToOnPremManaged {
-    param(
-        [Parameter(Mandatory=$true)]
-        $SelectedUser
-    )
-    
-    $identity = $SelectedUser.UserPrincipalName
-    $displayName = $SelectedUser.DisplayName
-    
-    Write-Log "Converting user '$displayName' ($identity) to On-Premises Managed..."
-    
+function Backup-AllUsers {
+    $operation = 'AllUsers'
+    $count = 0
+    $cancelled = $false
+    $backupFile = $null
+
+    Set-BusyState -Busy $true -Message "Backing up..."
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+
     try {
-        Set-Mailbox -Identity $identity -IsExchangeCloudManaged $false -ErrorAction Stop
-        
-        Write-Log "Successfully converted user '$displayName' ($identity) to On-Premises Managed." -Level INFO
-        
-        return $true
+        $backupFolder = Get-SoaBackupFolder
+        $backupFile = Join-Path $backupFolder ("SOA-Backup_{0}_{1}.csv" -f $operation, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+        $buffer = New-Object System.Collections.Generic.List[object]
+
+        do {
+            Get-Mailbox -Filter 'IsDirSynced -eq $true' -ResultSize Unlimited -ErrorAction Stop | ForEach-Object {
+                if ($script:CancelRequested) {
+                    break
+                }
+
+                $buffer.Add((ConvertTo-SoaBackupRecord -Mailbox $_ -Operation $operation))
+                $count++
+
+                if ($buffer.Count -ge 500) {
+                    Export-SoaBackupRecord -Record $buffer -Path $backupFile
+                    $buffer.Clear()
+                }
+
+                if ($count % 50 -eq 0) {
+                    $statusLabel.Text = "Backing up... $count users"
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+        } while ($false)
+
+        if ($buffer.Count -gt 0) {
+            Export-SoaBackupRecord -Record $buffer -Path $backupFile
+            $buffer.Clear()
+        }
+
+        $cancelled = $script:CancelRequested
     }
     catch {
-        Write-Log "Failed to convert user '$displayName' ($identity) to On-Premises Managed. Error: $($_.Exception.Message)" -Level ERROR
-        
-        return $false
+        Write-Log "Backup All Users failed: $($_.Exception.Message)" -Level ERROR
+        Set-BusyState -Busy $false
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "Failed to back up users.`n`nError: $($_.Exception.Message)",
+            "Backup Failed",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+
+        if ($script:CloseRequested) {
+            $form.Close()
+        }
+        return
+    }
+
+    Set-BusyState -Busy $false
+
+    if ($cancelled) {
+        Write-Log "Backup All Users cancelled after $count users. Partial file: $backupFile" -Level WARNING
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "Backup was cancelled. The file is partial and contains $count users.`n`nFile:`n$backupFile",
+            "Backup Cancelled",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+    }
+    else {
+        Write-Log "Backup All Users completed. $count users written to $backupFile"
+        $statusLabel.Text = "Backup complete - $count users"
+
+        $openResult = [System.Windows.Forms.MessageBox]::Show(
+            "Backup completed successfully.`n`nUsers backed up: $count`nFile:`n$backupFile`n`nOpen the backup folder?",
+            "Backup Complete",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        )
+
+        if ($openResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+            try {
+                Start-Process explorer.exe -ArgumentList (Split-Path $backupFile -Parent)
+            }
+            catch {
+                Write-Log "Failed to open backup folder: $($_.Exception.Message)" -Level WARNING
+            }
+        }
+    }
+
+    if ($script:CloseRequested) {
+        $form.Close()
     }
 }
 
@@ -333,7 +728,7 @@ Write-Log "========================================" -Level INFO
 Write-Log "Exchange SOA Conversion tool Started" -Level INFO
 Write-Log "========================================" -Level INFO
 
-if (-not (Search-ExchangeOnlineModule)) {
+if (-not (Initialize-ExchangeOnlineModule)) {
     Write-Log "Cannot proceed without Exchange Online Management module. Exiting." -Level ERROR
     exit 1
 }
@@ -409,26 +804,58 @@ $buttonConnect.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $buttonConnect.FlatAppearance.BorderSize = 0
 $buttonConnect.Cursor = [System.Windows.Forms.Cursors]::Hand
 $buttonConnect.Add_Click({
-    $buttonConnect.Enabled = $false
-    $buttonRefresh.Enabled = $false
-    
+    Set-BusyState -Busy $true -Message "Signing in to Exchange Online..."
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    [System.Windows.Forms.Application]::DoEvents()
+
     if (Connect-ExchangeOnlineSession) {
+        $script:IsConnected = $true
         $buttonConnect.Text = "Connected"
         $buttonConnect.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#107C10")
-        $buttonConnect.Enabled = $false
-        $buttonRefresh.Enabled = $true
-        $buttonDisconnect.Enabled = $true
-        
+
+        $soaSuffix = ''
+        try {
+            $orgConfig = Get-OrganizationConfig -ErrorAction Stop
+            Write-Log "Tenant BlockExchangeProvisioningFromOnPremEnabled: $($orgConfig.BlockExchangeProvisioningFromOnPremEnabled)"
+            if ($orgConfig.BlockExchangeProvisioningFromOnPremEnabled -eq $true) {
+                $soaSuffix = " | Tenant-wide SOA: Enabled"
+            }
+        }
+        catch {
+            Write-Log "Could not read organization config: $($_.Exception.Message)" -Level WARNING
+        }
+
+        $statusLabel.Text = "Loading users..."
+        [System.Windows.Forms.Application]::DoEvents()
+
         $users = Get-ExchangeUsers
-        
-        if ($users) {
+
+        Set-BusyState -Busy $false
+
+        if ($null -ne $users) {
+            $script:AllUsers = [object[]]$users.ToArray()
+            $script:UserIndex = @{}
+            foreach ($u in $script:AllUsers) {
+                $script:UserIndex[$u.Guid] = $u
+            }
             $script:CurrentPage = 1
-            Update-UserGrid -Users $users
-            $statusLabel.Text = "Connected - $($users.Count) users loaded"
+            $script:ViewUsers = @(Select-SoaUsers -Users $script:AllUsers -SearchText $textBoxSearch.Text)
+            Update-UserGrid
+            $statusLabel.Text = "Connected - $($script:AllUsers.Count) users loaded$soaSuffix"
+        }
+        elseif ($script:CancelRequested) {
+            $statusLabel.Text = "Load cancelled"
+        }
+        else {
+            $statusLabel.Text = "Connected - failed to load users$soaSuffix"
         }
     }
     else {
-        $buttonConnect.Enabled = $true
+        Set-BusyState -Busy $false
+    }
+
+    if ($script:CloseRequested) {
+        $form.Close()
     }
 })
 $form.Controls.Add($buttonConnect)
@@ -445,17 +872,31 @@ $buttonRefresh.FlatAppearance.BorderSize = 0
 $buttonRefresh.Cursor = [System.Windows.Forms.Cursors]::Hand
 $buttonRefresh.Enabled = $false
 $buttonRefresh.Add_Click({
-    $buttonRefresh.Enabled = $false
-    
+    Set-BusyState -Busy $true -Message "Loading users..."
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+
     $users = Get-ExchangeUsers
-    
-    if ($users) {
+
+    Set-BusyState -Busy $false
+
+    if ($null -ne $users) {
+        $script:AllUsers = [object[]]$users.ToArray()
+        $script:UserIndex = @{}
+        foreach ($u in $script:AllUsers) {
+            $script:UserIndex[$u.Guid] = $u
+        }
         $script:CurrentPage = 1
-        Update-UserGrid -Users $users
-        $statusLabel.Text = "Refreshed - $($users.Count) users loaded"
+        $script:ViewUsers = @(Select-SoaUsers -Users $script:AllUsers -SearchText $textBoxSearch.Text)
+        Update-UserGrid
+        $statusLabel.Text = "Refreshed - $($script:AllUsers.Count) users loaded"
     }
-    
-    $buttonRefresh.Enabled = $true
+    elseif ($script:CancelRequested) {
+        $statusLabel.Text = "Load cancelled"
+    }
+
+    if ($script:CloseRequested) {
+        $form.Close()
+    }
 })
 $form.Controls.Add($buttonRefresh)
 
@@ -472,44 +913,112 @@ $buttonDisconnect.Cursor = [System.Windows.Forms.Cursors]::Hand
 $buttonDisconnect.Enabled = $false
 $buttonDisconnect.Add_Click({
     Write-Log "Disconnecting from Exchange Online..."
-    
+
     try {
         Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop
         Write-Log "Successfully disconnected from Exchange Online."
-        
-        $buttonConnect.Text = "Connect to EXO"
-        $buttonConnect.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0078D4")
-        $buttonConnect.Enabled = $true
-        $buttonRefresh.Enabled = $false
-        $buttonDisconnect.Enabled = $false
-        
-        $dataGridView.Rows.Clear()
-        
-        $statusLabel.Text = "Disconnected"
-        
-        [System.Windows.Forms.MessageBox]::Show(
-            "Successfully disconnected from Exchange Online.",
-            "Disconnected",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
     }
     catch {
         Write-Log "Error during disconnect: $($_.Exception.Message)" -Level WARNING
-        
-        [System.Windows.Forms.MessageBox]::Show(
-            "An error occurred while disconnecting.`n`nError: $($_.Exception.Message)",
-            "Disconnect Warning",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
     }
+
+    $script:IsConnected = $false
+    $script:AllUsers = @()
+    $script:ViewUsers = @()
+    $script:UserIndex = @{}
+    $script:CurrentPage = 1
+    $textBoxSearch.Text = ''
+
+    $buttonConnect.Text = "Connect to EXO"
+    $buttonConnect.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0078D4")
+    $buttonConnect.Enabled = $true
+    $buttonRefresh.Enabled = $false
+    $buttonDisconnect.Enabled = $false
+    $buttonBackupAll.Enabled = $false
+    $buttonConvertToCloud.Enabled = $false
+    $buttonConvertToOnPrem.Enabled = $false
+
+    Update-UserGrid
+    $pageInfo.Text = "No users to display"
+    $buttonPrevPage.Enabled = $false
+    $buttonNextPage.Enabled = $false
+
+    $statusLabel.Text = "Disconnected"
 })
 $form.Controls.Add($buttonDisconnect)
 
+$buttonBackupAll = New-Object System.Windows.Forms.Button
+$buttonBackupAll.Location = New-Object System.Drawing.Point(545, 105)
+$buttonBackupAll.Size = New-Object System.Drawing.Size(170, 40)
+$buttonBackupAll.Text = "Backup All Users"
+$buttonBackupAll.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$buttonBackupAll.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#E1E1E1")
+$buttonBackupAll.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#1F1F1F")
+$buttonBackupAll.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$buttonBackupAll.FlatAppearance.BorderSize = 0
+$buttonBackupAll.Cursor = [System.Windows.Forms.Cursors]::Hand
+$buttonBackupAll.Enabled = $false
+$buttonBackupAll.Add_Click({
+    Backup-AllUsers
+})
+$form.Controls.Add($buttonBackupAll)
+
+$buttonCancel = New-Object System.Windows.Forms.Button
+$buttonCancel.Location = New-Object System.Drawing.Point(725, 105)
+$buttonCancel.Size = New-Object System.Drawing.Size(110, 40)
+$buttonCancel.Text = "Cancel"
+$buttonCancel.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$buttonCancel.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#D83B01")
+$buttonCancel.ForeColor = [System.Drawing.Color]::White
+$buttonCancel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$buttonCancel.FlatAppearance.BorderSize = 0
+$buttonCancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+$buttonCancel.Visible = $false
+$buttonCancel.Add_Click({
+    $script:CancelRequested = $true
+    $buttonCancel.Enabled = $false
+    $statusLabel.Text = "Cancelling..."
+})
+$form.Controls.Add($buttonCancel)
+
+$labelSearch = New-Object System.Windows.Forms.Label
+$labelSearch.Location = New-Object System.Drawing.Point(20, 160)
+$labelSearch.Size = New-Object System.Drawing.Size(60, 22)
+$labelSearch.Text = "Search:"
+$labelSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$labelSearch.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#1F1F1F")
+$labelSearch.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$form.Controls.Add($labelSearch)
+
+$textBoxSearch = New-Object System.Windows.Forms.TextBox
+$textBoxSearch.Location = New-Object System.Drawing.Point(80, 160)
+$textBoxSearch.Size = New-Object System.Drawing.Size(400, 22)
+$textBoxSearch.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Controls.Add($textBoxSearch)
+
+$progressBar = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Size = New-Object System.Drawing.Size(315, 20)
+$progressBar.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 335), 160)
+$progressBar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$progressBar.Visible = $false
+$form.Controls.Add($progressBar)
+
+$searchTimer = New-Object System.Windows.Forms.Timer
+$searchTimer.Interval = 300
+$searchTimer.Add_Tick({
+    $searchTimer.Stop()
+    $script:ViewUsers = @(Select-SoaUsers -Users $script:AllUsers -SearchText $textBoxSearch.Text)
+    $script:CurrentPage = 1
+    Update-UserGrid
+})
+$textBoxSearch.Add_TextChanged({
+    $searchTimer.Stop()
+    $searchTimer.Start()
+})
+
 $dataGridView = New-Object System.Windows.Forms.DataGridView
-$dataGridView.Location = New-Object System.Drawing.Point(20, 165)
-$dataGridView.Size = New-Object System.Drawing.Size(960, 380)
+$dataGridView.Location = New-Object System.Drawing.Point(20, 195)
+$dataGridView.Size = New-Object System.Drawing.Size(960, 350)
 $dataGridView.AllowUserToAddRows = $false
 $dataGridView.AllowUserToDeleteRows = $false
 $dataGridView.ReadOnly = $true
@@ -537,9 +1046,9 @@ $dataGridView.RowHeadersVisible = $false
 $dataGridView.CellBorderStyle = [System.Windows.Forms.DataGridViewCellBorderStyle]::SingleHorizontal
 $dataGridView.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $dataGridView.Add_ColumnHeaderMouseClick({
-    param($sender, $e)
-    $columnName = $sender.Columns[$e.ColumnIndex].Name
-    if ($columnName -ne "UserPrincipalName") {
+    param($eventSender, $e)
+    $columnName = $eventSender.Columns[$e.ColumnIndex].Name
+    if ($columnName -ne "Guid") {
         Sort-Users -ColumnName $columnName
     }
 })
@@ -547,14 +1056,20 @@ $dataGridView.Add_ColumnHeaderMouseClick({
 $colDisplayName = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
 $colDisplayName.Name = "DisplayName"
 $colDisplayName.HeaderText = "Display Name"
-$colDisplayName.FillWeight = 30
+$colDisplayName.FillWeight = 25
 [void]$dataGridView.Columns.Add($colDisplayName)
 
 $colEmail = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
 $colEmail.Name = "Email"
 $colEmail.HeaderText = "Email Address"
-$colEmail.FillWeight = 35
+$colEmail.FillWeight = 30
 [void]$dataGridView.Columns.Add($colEmail)
+
+$colType = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$colType.Name = "Type"
+$colType.HeaderText = "Type"
+$colType.FillWeight = 20
+[void]$dataGridView.Columns.Add($colType)
 
 $colCloudManaged = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
 $colCloudManaged.Name = "IsExchangeCloudManaged"
@@ -562,11 +1077,11 @@ $colCloudManaged.HeaderText = "Cloud Managed"
 $colCloudManaged.FillWeight = 25
 [void]$dataGridView.Columns.Add($colCloudManaged)
 
-$colUserPrincipalName = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
-$colUserPrincipalName.Name = "UserPrincipalName"
-$colUserPrincipalName.HeaderText = "User Principal Name"
-$colUserPrincipalName.Visible = $false
-[void]$dataGridView.Columns.Add($colUserPrincipalName)
+$colGuid = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$colGuid.Name = "Guid"
+$colGuid.HeaderText = "Guid"
+$colGuid.Visible = $false
+[void]$dataGridView.Columns.Add($colGuid)
 
 $form.Controls.Add($dataGridView)
 
@@ -613,7 +1128,7 @@ $buttonNextPage.Cursor = [System.Windows.Forms.Cursors]::Hand
 $buttonNextPage.Enabled = $false
 $buttonNextPage.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $buttonNextPage.Add_Click({
-    $totalPages = [Math]::Ceiling($script:AllUsers.Count / $script:PageSize)
+    $totalPages = [Math]::Ceiling($script:ViewUsers.Count / $script:PageSize)
     if ($script:CurrentPage -lt $totalPages) {
         $script:CurrentPage++
         Update-UserGrid
@@ -631,70 +1146,10 @@ $buttonConvertToCloud.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#1
 $buttonConvertToCloud.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $buttonConvertToCloud.FlatAppearance.BorderSize = 0
 $buttonConvertToCloud.Cursor = [System.Windows.Forms.Cursors]::Hand
+$buttonConvertToCloud.Enabled = $false
 $buttonConvertToCloud.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $buttonConvertToCloud.Add_Click({
-    if ($dataGridView.SelectedRows.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show(
-            "Please select at least one user from the list.",
-            "No User Selected",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        return
-    }
-    
-    $selectedCount = $dataGridView.SelectedRows.Count
-    $userList = ($dataGridView.SelectedRows | ForEach-Object { $_.Cells["DisplayName"].Value }) -join ", "
-    
-    $confirmMessage = if ($selectedCount -eq 1) {
-        "Are you sure you want to convert user '$userList' to Cloud Managed?"
-    } else {
-        "Are you sure you want to convert $selectedCount users to Cloud Managed?`n`nUsers: $userList"
-    }
-    
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        $confirmMessage,
-        "Confirm Conversion",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
-    
-    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-        $successCount = 0
-        $failCount = 0
-        
-        foreach ($selectedRow in $dataGridView.SelectedRows) {
-            $selectedUser = @{
-                DisplayName = $selectedRow.Cells["DisplayName"].Value
-                PrimarySmtpAddress = $selectedRow.Cells["Email"].Value
-                UserPrincipalName = $selectedRow.Cells["UserPrincipalName"].Value
-            }
-            
-            if (Convert-ToCloudManaged -SelectedUser $selectedUser) {
-                $selectedRow.Cells["IsExchangeCloudManaged"].Value = "True"
-                
-                $userInArray = $script:AllUsers | Where-Object { $_.UserPrincipalName -eq $selectedUser.UserPrincipalName }
-                if ($userInArray) {
-                    $userInArray.IsExchangeCloudManaged = $true
-                }
-                
-                $successCount++
-            } else {
-                $failCount++
-            }
-        }
-        
-        $summaryMessage = "Batch conversion completed.`n`nSuccessful: $successCount`nFailed: $failCount"
-        
-        [System.Windows.Forms.MessageBox]::Show(
-            $summaryMessage,
-            "Batch Conversion Summary",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
-        
-        Write-Log "Batch conversion to Cloud Managed completed. Success: $successCount, Failed: $failCount"
-    }
+    Invoke-SoaConversion -ToCloud $true
 })
 $form.Controls.Add($buttonConvertToCloud)
 
@@ -708,70 +1163,10 @@ $buttonConvertToOnPrem.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#
 $buttonConvertToOnPrem.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $buttonConvertToOnPrem.FlatAppearance.BorderSize = 0
 $buttonConvertToOnPrem.Cursor = [System.Windows.Forms.Cursors]::Hand
+$buttonConvertToOnPrem.Enabled = $false
 $buttonConvertToOnPrem.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $buttonConvertToOnPrem.Add_Click({
-    if ($dataGridView.SelectedRows.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show(
-            "Please select at least one user from the list.",
-            "No User Selected",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        return
-    }
-    
-    $selectedCount = $dataGridView.SelectedRows.Count
-    $userList = ($dataGridView.SelectedRows | ForEach-Object { $_.Cells["DisplayName"].Value }) -join ", "
-    
-    $confirmMessage = if ($selectedCount -eq 1) {
-        "Are you sure you want to convert user '$userList' to On-Premises Managed?"
-    } else {
-        "Are you sure you want to convert $selectedCount users to On-Premises Managed?`n`nUsers: $userList"
-    }
-    
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        $confirmMessage,
-        "Confirm Conversion",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
-    
-    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-        $successCount = 0
-        $failCount = 0
-        
-        foreach ($selectedRow in $dataGridView.SelectedRows) {
-            $selectedUser = @{
-                DisplayName = $selectedRow.Cells["DisplayName"].Value
-                PrimarySmtpAddress = $selectedRow.Cells["Email"].Value
-                UserPrincipalName = $selectedRow.Cells["UserPrincipalName"].Value
-            }
-            
-            if (Convert-ToOnPremManaged -SelectedUser $selectedUser) {
-                $selectedRow.Cells["IsExchangeCloudManaged"].Value = "False"
-                
-                $userInArray = $script:AllUsers | Where-Object { $_.UserPrincipalName -eq $selectedUser.UserPrincipalName }
-                if ($userInArray) {
-                    $userInArray.IsExchangeCloudManaged = $false
-                }
-                
-                $successCount++
-            } else {
-                $failCount++
-            }
-        }
-        
-        $summaryMessage = "Batch conversion completed.`n`nSuccessful: $successCount`nFailed: $failCount"
-        
-        [System.Windows.Forms.MessageBox]::Show(
-            $summaryMessage,
-            "Batch Conversion Summary",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
-        
-        Write-Log "Batch conversion to On-Premises Managed completed. Success: $successCount, Failed: $failCount"
-    }
+    Invoke-SoaConversion -ToCloud $false
 })
 $form.Controls.Add($buttonConvertToOnPrem)
 
@@ -837,34 +1232,48 @@ $form.Add_Resize({
     $buttonConvertToCloud.Location = New-Object System.Drawing.Point(20, $buttonY)
     $buttonConvertToOnPrem.Location = New-Object System.Drawing.Point(255, $buttonY)
     $buttonOpenLog.Location = New-Object System.Drawing.Point(490, $buttonY)
-    
+
     $statusY = $form.ClientSize.Height - 105
     $statusLabel.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 335), $statusY)
-    
+
     $versionY = $form.ClientSize.Height - 85
     $versionLabel.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 335), $versionY)
-    
+
     $paginationY = $buttonY - 40
     $buttonPrevPage.Location = New-Object System.Drawing.Point(20, $paginationY)
     $pageInfo.Location = New-Object System.Drawing.Point(130, $paginationY)
     $pageInfo.Size = New-Object System.Drawing.Size(($form.ClientSize.Width - 270), 30)
     $buttonNextPage.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 120), $paginationY)
-    
-    $gridHeight = $paginationY - 175
+
+    $gridTop = 195
+    $gridHeight = $paginationY - $gridTop - 10
     $dataGridView.Size = New-Object System.Drawing.Size(($form.ClientSize.Width - 40), $gridHeight)
 })
 
 $form.Add_FormClosing({
+    param($eventSender, $e)
+
+    if ($script:IsBusy) {
+        $script:CancelRequested = $true
+        $script:CloseRequested = $true
+        $e.Cancel = $true
+        Write-Log "Close requested while busy - will close after current operation." -Level INFO
+        return
+    }
+
     Write-Log "Exchange SOA Conversion tool Closing" -Level INFO
-    
-    try {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Log "Disconnected from Exchange Online." -Level INFO
+
+    if ($script:IsConnected) {
+        try {
+            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Log "Disconnected from Exchange Online." -Level INFO
+        }
+        catch {
+            Write-Log "Error during disconnect: $($_.Exception.Message)" -Level WARNING
+        }
+        $script:IsConnected = $false
     }
-    catch {
-        Write-Log "Error during disconnect: $($_.Exception.Message)" -Level WARNING
-    }
-    
+
     if ($pictureBoxLogo.Image) {
         $pictureBoxLogo.Image.Dispose()
     }
